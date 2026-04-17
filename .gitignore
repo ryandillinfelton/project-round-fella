@@ -1,0 +1,12 @@
+# macOS
+.DS_Store
+
+# PlatformIO build artifacts
+Tamagotchi/.pio/
+
+# VSCode IntelliSense cache
+Tamagotchi/.vscode/.browse.c_cpp.db*
+Tamagotchi/.vscode/ipch/
+
+# Claude Code project file
+CLAUDE.md
