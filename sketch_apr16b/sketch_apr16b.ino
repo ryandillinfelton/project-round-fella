@@ -1,7 +1,11 @@
 #include <Arduino_GFX_Library.h>
-#include <Adafruit_FT6206.h>
-#include <Adafruit_CST8XX.h>
 #include <LittleFS.h>
+#include <Wire.h>
+
+#include "animator.h"
+#include "stats.h"
+#include "touch.h"
+#include "ui.h"
 
 Arduino_XCA9554SWSPI *expander = new Arduino_XCA9554SWSPI(
     PCA_TFT_RESET, PCA_TFT_CS, PCA_TFT_SCK, PCA_TFT_MOSI,
@@ -19,158 +23,28 @@ Arduino_ESP32RGBPanel *rgbpanel = new Arduino_ESP32RGBPanel(
     );
 
 Arduino_RGB_Display *display = new Arduino_RGB_Display(
-// 2.1" 480x480 round display
     480 /* width */, 480 /* height */, rgbpanel, 0 /* rotation */, false /* auto_flush */,
     expander, GFX_NOT_DEFINED /* RST */, TL021WVC02_init_operations, sizeof(TL021WVC02_init_operations));
 
-Arduino_Canvas *gfx = new Arduino_Canvas(480 /* width */, 480 /* height */, display);;
+Arduino_Canvas *gfx = new Arduino_Canvas(480, 480, display);
 
-// 2.1" 480x480 round display use CST826 touchscreen with I2C Address at 0x15
 #define I2C_TOUCH_ADDR 0x15
 
-Adafruit_FT6206 focal_ctp = Adafruit_FT6206();  // this library also supports FT5336U!
-Adafruit_CST8XX cst_ctp = Adafruit_CST8XX();
-bool touchOK = false;
-bool isFocalTouch = false;
+Animator  idleAnimator;
+Animator  sadAnimator;
+PetStats  stats;
+TouchInput touch;
 
-const char *frameFiles[] = { "/Frame1.bin", "/Frame2.bin" };
-uint16_t *frameBuffers[2] = { nullptr, nullptr };
-uint8_t currentFrame = 0;
-unsigned long lastFrameTime = 0;
-const unsigned long FRAME_INTERVAL_MS = 500;
-
-unsigned long lastLoopTime = 0;
-float deltaTime = 0.0f;
-
-uint8_t hungerLevel = 3;
-uint8_t funLevel    = 3;
-unsigned long lastDecayTime = 0;
-const unsigned long DECAY_INTERVAL_MS = 30000;
-const uint8_t STAT_MAX = 5;
-
-enum ButtonID { BTN_FEED, BTN_PLAY, BTN_COUNT };
-
-struct Button { int16_t x, y, w, h; const char *label; };
-
-const Button buttons[BTN_COUNT] = {
-  { 155, 390, 80, 40, "Feed" },
-  { 245, 390, 80, 40, "Play" },
-};
-
-#define FRAME_PIXELS (480 * 480)
-
-void loadFrames() {
-  for (int i = 0; i < 2; i++) {
-    frameBuffers[i] = (uint16_t *)ps_malloc(FRAME_PIXELS * sizeof(uint16_t));
-    if (!frameBuffers[i]) {
-      Serial.printf("Failed to allocate frame %d\n", i);
-      return;
-    }
-    File f = LittleFS.open(frameFiles[i]);
-    if (!f) {
-      Serial.printf("Failed to open %s\n", frameFiles[i]);
-      return;
-    }
-    f.read((uint8_t *)frameBuffers[i], FRAME_PIXELS * sizeof(uint16_t));
-    f.close();
-    Serial.printf("Loaded %s\n", frameFiles[i]);
-  }
-}
-
-void displayFrame(uint8_t index) {
-  if (frameBuffers[index]) {
-    gfx->draw16bitRGBBitmap(0, 0, frameBuffers[index], 480, 480);
-  }
-}
-
-void drawButtons() {
-  for (int i = 0; i < BTN_COUNT; i++) {
-    const Button &b = buttons[i];
-    gfx->fillRoundRect(b.x, b.y, b.w, b.h, 8, 0x4A69);
-    gfx->drawRoundRect(b.x, b.y, b.w, b.h, 8, RGB565_WHITE);
-    gfx->setTextColor(RGB565_WHITE);
-    gfx->setTextSize(2);
-    gfx->setCursor(b.x + 8, b.y + 12);
-    gfx->print(b.label);
-  }
-}
-
-void drawStatBank(int16_t cx, int16_t labelY, const char *label, uint8_t level) {
-  const uint8_t textSize = 3;
-  int16_t labelW = strlen(label) * 6 * textSize;
-  gfx->setTextColor(RGB565_BLACK);
-  gfx->setTextSize(textSize);
-  gfx->setCursor(cx - labelW / 2, labelY);
-  gfx->print(label);
-
-  const int16_t r = 11, gap = 6, spacing = 2 * r + gap;
-  int16_t startX = cx - 2 * spacing;
-  int16_t circleY = labelY + 8 * textSize + r + 6;
-  for (int i = 0; i < STAT_MAX; i++) {
-    int16_t x = startX + i * spacing;
-    if (i < level) gfx->fillCircle(x, circleY, r, RGB565_BLACK);
-    else           gfx->drawCircle(x, circleY, r, RGB565_BLACK);
-  }
-}
-
-void drawStats() {
-  drawStatBank(170, 40, "Hunger", hungerLevel);
-  drawStatBank(310, 40, "Fun",    funLevel);
-}
-
-void render() {
-  displayFrame(currentFrame);
-  drawButtons();
-  drawStats();
+void render(bool sad) {
+  if (sad) sadAnimator.render(gfx, 0, 0);
+  else     idleAnimator.render(gfx, 0, 0);
+  drawButtons(gfx);
+  drawStats(gfx, stats);
   gfx->flush();
   display->flush();
 }
 
-bool getTouchPoint(int16_t &x, int16_t &y) {
-  if (!touchOK) return false;
-  if (isFocalTouch) {
-    if (!focal_ctp.touched()) return false;
-    TS_Point p = focal_ctp.getPoint(0);
-    x = p.x; y = p.y;
-  } else {
-    if (!cst_ctp.touched()) return false;
-    CST_TS_Point p = cst_ctp.getPoint(0);
-    x = p.x; y = p.y;
-  }
-  return true;
-}
-
-void onButtonPressed(ButtonID id) {
-  switch (id) {
-    case BTN_FEED: if (hungerLevel < STAT_MAX) hungerLevel++; break;
-    case BTN_PLAY: if (funLevel    < STAT_MAX) funLevel++;    break;
-    default: break;
-  }
-}
-
-void pollButtons() {
-  static bool wasTouched = false;
-  int16_t tx, ty;
-  bool touched = getTouchPoint(tx, ty);
-  if (touched && !wasTouched) {
-    Serial.printf("Touch at %d,%d\n", tx, ty);
-    bool hit = false;
-    for (int i = 0; i < BTN_COUNT; i++) {
-      const Button &b = buttons[i];
-      if (tx >= b.x && tx < b.x + b.w && ty >= b.y && ty < b.y + b.h) {
-        Serial.printf("  -> hit button %d (%s)\n", i, b.label);
-        onButtonPressed((ButtonID)i);
-        hit = true;
-        break;
-      }
-    }
-    if (!hit) Serial.println("  -> no button hit");
-  }
-  wasTouched = touched;
-}
-
-void setup(void)
-{
+void setup() {
   Serial.begin(115200);
 
 #ifdef GFX_EXTRA_PRE_INIT
@@ -188,49 +62,47 @@ void setup(void)
   if (!LittleFS.begin()) {
     Serial.println("LittleFS mount failed!");
   }
-  loadFrames();
 
-  if (!focal_ctp.begin(0, &Wire, I2C_TOUCH_ADDR)) {
-    if (!cst_ctp.begin(&Wire, I2C_TOUCH_ADDR)) {
-      Serial.print("No Touchscreen found at address 0x");
-      Serial.println(I2C_TOUCH_ADDR, HEX);
-      touchOK = false;
-    } else {
-      Serial.println("CST826 Touchscreen found");
-      touchOK = true;
-      isFocalTouch = false;
-    }
-  } else {
-    Serial.println("Focal Touchscreen found");
-    touchOK = true;
-    isFocalTouch = true;
-  }
+  static const char* kIdleFrames[] = { "/idleFrame1.bin", "/idleFrame2.bin" };
+  idleAnimator.load(kIdleFrames, 2);
 
-  lastLoopTime = millis();
-  lastDecayTime = millis();
-  render();
+  static const char* kSadFrames[] = { "/SadFrame1.bin", "/SadFrame2.bin" };
+  sadAnimator.load(kSadFrames, 2);
+
+  touch.begin(&Wire, I2C_TOUCH_ADDR);
+
+  render(false);
 }
 
-void loop()
-{
+void loop() {
   unsigned long now = millis();
-  deltaTime = (now - lastLoopTime) / 1000.0f;
-  lastLoopTime = now;
 
-  pollButtons();
-  
-  if (now - lastDecayTime >= DECAY_INTERVAL_MS) {
-    if (hungerLevel > 0) hungerLevel--;
-    if (funLevel    > 0) funLevel--;
-    lastDecayTime = now;
+  static bool wasTouched = false;
+  int16_t tx, ty;
+  bool touched = touch.getPoint(tx, ty);
+  if (touched && !wasTouched) {
+    Serial.printf("Touch at %d,%d\n", tx, ty);
+    ButtonID id = hitTest(tx, ty);
+    if (id < BTN_COUNT) {
+      Serial.printf("  -> hit button %d (%s)\n", id, buttons[id].label);
+      switch (id) {
+        case BTN_FEED: stats.feed(); break;
+        case BTN_PLAY: stats.play(); break;
+        default: break;
+      }
+    } else {
+      Serial.println("  -> no button hit");
+    }
   }
+  wasTouched = touched;
 
-  if (now - lastFrameTime >= FRAME_INTERVAL_MS) {
-    currentFrame = (currentFrame + 1) % 2;
-    lastFrameTime = now;
-    render();
-  }
+  stats.tickDecay(now);
 
+  bool isSad = (stats.hunger() == 0 || stats.fun() == 0);
+  static bool wasSad = false;
+  bool ticked = isSad ? sadAnimator.tick(now) : idleAnimator.tick(now);
+  if (ticked || isSad != wasSad) render(isSad);
+  wasSad = isSad;
 
   if (!expander->digitalRead(PCA_BUTTON_DOWN)) {
     expander->digitalWrite(PCA_TFT_BACKLIGHT, LOW);
