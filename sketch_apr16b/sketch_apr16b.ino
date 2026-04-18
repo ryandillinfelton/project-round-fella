@@ -42,14 +42,19 @@ const unsigned long FRAME_INTERVAL_MS = 500;
 unsigned long lastLoopTime = 0;
 float deltaTime = 0.0f;
 
-enum ButtonID { BTN_FEED, BTN_PLAY, BTN_SLEEP, BTN_COUNT };
+uint8_t hungerLevel = 3;
+uint8_t funLevel    = 3;
+unsigned long lastDecayTime = 0;
+const unsigned long DECAY_INTERVAL_MS = 30000;
+const uint8_t STAT_MAX = 5;
+
+enum ButtonID { BTN_FEED, BTN_PLAY, BTN_COUNT };
 
 struct Button { int16_t x, y, w, h; const char *label; };
 
 const Button buttons[BTN_COUNT] = {
-  { 110, 390, 80, 40, "Feed"  },
-  { 200, 390, 80, 40, "Play"  },
-  { 290, 390, 80, 40, "Sleep" },
+  { 155, 390, 80, 40, "Feed" },
+  { 245, 390, 80, 40, "Play" },
 };
 
 #define FRAME_PIXELS (480 * 480)
@@ -90,9 +95,33 @@ void drawButtons() {
   }
 }
 
+void drawStatBank(int16_t cx, int16_t labelY, const char *label, uint8_t level) {
+  const uint8_t textSize = 3;
+  int16_t labelW = strlen(label) * 6 * textSize;
+  gfx->setTextColor(RGB565_BLACK);
+  gfx->setTextSize(textSize);
+  gfx->setCursor(cx - labelW / 2, labelY);
+  gfx->print(label);
+
+  const int16_t r = 11, gap = 6, spacing = 2 * r + gap;
+  int16_t startX = cx - 2 * spacing;
+  int16_t circleY = labelY + 8 * textSize + r + 6;
+  for (int i = 0; i < STAT_MAX; i++) {
+    int16_t x = startX + i * spacing;
+    if (i < level) gfx->fillCircle(x, circleY, r, RGB565_BLACK);
+    else           gfx->drawCircle(x, circleY, r, RGB565_BLACK);
+  }
+}
+
+void drawStats() {
+  drawStatBank(170, 40, "Hunger", hungerLevel);
+  drawStatBank(310, 40, "Fun",    funLevel);
+}
+
 void render() {
   displayFrame(currentFrame);
   drawButtons();
+  drawStats();
   gfx->flush();
   display->flush();
 }
@@ -113,9 +142,9 @@ bool getTouchPoint(int16_t &x, int16_t &y) {
 
 void onButtonPressed(ButtonID id) {
   switch (id) {
-    case BTN_FEED:  Serial.println("Feed");  break;
-    case BTN_PLAY:  Serial.println("Play");  break;
-    case BTN_SLEEP: Serial.println("Sleep"); break;
+    case BTN_FEED: if (hungerLevel < STAT_MAX) hungerLevel++; break;
+    case BTN_PLAY: if (funLevel    < STAT_MAX) funLevel++;    break;
+    default: break;
   }
 }
 
@@ -124,13 +153,18 @@ void pollButtons() {
   int16_t tx, ty;
   bool touched = getTouchPoint(tx, ty);
   if (touched && !wasTouched) {
+    Serial.printf("Touch at %d,%d\n", tx, ty);
+    bool hit = false;
     for (int i = 0; i < BTN_COUNT; i++) {
       const Button &b = buttons[i];
       if (tx >= b.x && tx < b.x + b.w && ty >= b.y && ty < b.y + b.h) {
+        Serial.printf("  -> hit button %d (%s)\n", i, b.label);
         onButtonPressed((ButtonID)i);
+        hit = true;
         break;
       }
     }
+    if (!hit) Serial.println("  -> no button hit");
   }
   wasTouched = touched;
 }
@@ -173,6 +207,7 @@ void setup(void)
   }
 
   lastLoopTime = millis();
+  lastDecayTime = millis();
   render();
 }
 
@@ -184,6 +219,12 @@ void loop()
 
   pollButtons();
   
+  if (now - lastDecayTime >= DECAY_INTERVAL_MS) {
+    if (hungerLevel > 0) hungerLevel--;
+    if (funLevel    > 0) funLevel--;
+    lastDecayTime = now;
+  }
+
   if (now - lastFrameTime >= FRAME_INTERVAL_MS) {
     currentFrame = (currentFrame + 1) % 2;
     lastFrameTime = now;
